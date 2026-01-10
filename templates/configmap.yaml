@@ -4,6 +4,6 @@ kind: ConfigMap
 metadata:
   name: pythonapp
   labels:
-    {{- include "keycloak-dataone.labels" . | nindent 4 }}
+    {{- include "oidc-example.labels" . | nindent 4 }}
 data:
 {{ (tpl (.Files.Glob "pythonapp/*").AsConfig . ) | indent 4 }}
