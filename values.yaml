@@ -17,11 +17,8 @@ image:
 ##
 command:
   - /bin/bash
-  #- python
 args:
   - /app/app.sh
-  #- -c
-  #- import time; exec('while True:\n print(time.time()); time.sleep(10)')
 
 env:
   - name: FLASK_SECRET_KEY
