@@ -9,4 +9,5 @@ source ${VIRTUAL_ENV}/bin/activate
 uv sync --active
 
 echo "Starting app..."
-python app.py
+python flask-authlib.py
+#python app.py

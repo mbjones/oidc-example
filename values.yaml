@@ -59,13 +59,15 @@ ingress:
   hosts:
     - host: api.test.dataone.org
       paths:
-        - path: /kctest
+        - path: /dashboard
           pathType: Prefix
         - path: /authorize
           pathType: Prefix
         - path: /login
           pathType: Prefix
         - path: /logout
+          pathType: Prefix
+        - path: /profile
           pathType: Prefix
   tls:
     - secretName: ingress-nginx-tls-cert
