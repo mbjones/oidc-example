@@ -21,6 +21,7 @@ from authlib.integrations.flask_client import OAuth
 from authlib.jose import jwt
 from authlib.jose import JsonWebKey
 from authlib.jose.errors import InvalidTokenError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 def load_client_secrets(filepath="./client_secrets.json"):
@@ -43,6 +44,11 @@ def load_client_secrets(filepath="./client_secrets.json"):
 # Start a Flask application and set its secret
 app = Flask(__name__)
 app.config.update({"SECRET_KEY": os.getenv("FLASK_SECRET_KEY", os.urandom(32).hex())})
+
+# Tell flask we are behind a proxy
+# x_proto=1 tells Flask to trust the X-Forwarded-Proto header
+# x_host=1 tells Flask to trust the X-Forwarded-Host header
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # Configure your OIDC Provider (e.g., Keycloak)
 oauth = OAuth(app)
