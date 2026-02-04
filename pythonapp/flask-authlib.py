@@ -21,6 +21,8 @@ from authlib.integrations.flask_client import OAuth
 from authlib.jose import jwt
 from authlib.jose import JsonWebKey
 from authlib.jose.errors import InvalidTokenError
+from authlib.jose.errors import DecodeError
+from authlib.jose.errors import BadSignatureError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
@@ -138,9 +140,19 @@ def require_scope(required_scope):
 
                 # Pass claims to the protected function
                 return f(claims, *args, **kwargs)
+            except DecodeError as e:
+                return (
+                    jsonify({"error": "Token decoding failed", "details": str(e)}),
+                    401,
+                )
             except InvalidTokenError as e:
                 return (
                     jsonify({"error": "Token validation failed", "details": str(e)}),
+                    401,
+                )
+            except BadSignatureError as e:
+                return (
+                    jsonify({"error": "Token signature not verified", "details": str(e)}),
                     401,
                 )
             except ValueError as e:
