@@ -22,7 +22,11 @@ from authlib.jose import jwt
 from authlib.jose import JsonWebKey
 from authlib.jose.errors import InvalidTokenError
 from authlib.jose.errors import DecodeError
-from authlib.oauth2.rfc6749.errors import InvalidGrantError, InvalidClientError, OAuth2Error
+from authlib.oauth2.rfc6749.errors import (
+    InvalidGrantError,
+    InvalidClientError,
+    OAuth2Error,
+)
 from authlib.jose.errors import BadSignatureError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -40,7 +44,7 @@ def load_client_secrets(filepath="./client_secrets.json"):
         FileNotFoundError: If the secrets file does not exist
         json.JSONDecodeError: If the file is not valid JSON
     """
-    with open(filepath, "r") as f:
+    with open(filepath, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -65,8 +69,8 @@ oauth.register(
         # Set default scope to empty to manually control it in each request,
         # preventing authlib from auto-stripping 'openid'.
         "scope": "",
-        "token_endpoint_auth_method": "client_secret_post"
-    }
+        "token_endpoint_auth_method": "client_secret_post",
+    },
 )
 
 
@@ -158,7 +162,9 @@ def require_scope(required_scope):
                 )
             except BadSignatureError as e:
                 return (
-                    jsonify({"error": "Token signature not verified", "details": str(e)}),
+                    jsonify(
+                        {"error": "Token signature not verified", "details": str(e)}
+                    ),
                     401,
                 )
             except ValueError as e:
@@ -250,27 +256,28 @@ def authorize():
     except Exception as e:
         return jsonify({"error": "Authorization failed", "details": str(e)}), 401
 
-@app.route('/refresh', methods=['POST'])
+
+@app.route("/refresh", methods=["POST"])
 def refresh_token():
     """Re-validate the user session and return a new access token using the refresh token."""
     # 1. Get the refresh token and desired scopes from the frontend JSON body
     data = request.get_json()
 
-    user_refresh_token = data.get('refresh_token')
+    user_refresh_token = data.get("refresh_token")
     if not user_refresh_token:
         return jsonify({"error": "Missing refresh_token"}), 400
 
     # The client should pass the scopes from its expired access token
-    # This is required because the scopes in this request must match the 
+    # This is required because the scopes in this request must match the
     # scopes of the original access token for the refresh to succeed using OIDC standards.
-    requested_scope = data.get('scope')
+    requested_scope = data.get("scope")
     if not requested_scope:
         return jsonify({"error": "Missing scope parameter"}), 400
 
     # 2. Use Authlib to exchange the refresh token for a new access token
     try:
         new_tokens = oauth.dataone_oidc.fetch_access_token(
-            grant_type='refresh_token',
+            grant_type="refresh_token",
             refresh_token=user_refresh_token,
             scope=requested_scope,
         )
@@ -279,16 +286,38 @@ def refresh_token():
         return jsonify(new_tokens)
     except InvalidGrantError:
         # The refresh token was invalid, expired, or revoked by the provider
-        return jsonify({"error": "invalid_grant", "details": "The refresh token is invalid or expired."}), 401
+        return (
+            jsonify(
+                {
+                    "error": "invalid_grant",
+                    "details": "The refresh token is invalid or expired.",
+                }
+            ),
+            401,
+        )
     except InvalidClientError:
         # The client_id or client_secret is wrong
-        return jsonify({"error": "invalid_client", "details": "OIDC client authentication failed."}), 401
+        return (
+            jsonify(
+                {
+                    "error": "invalid_client",
+                    "details": "OIDC client authentication failed.",
+                }
+            ),
+            401,
+        )
     except OAuth2Error as e:
         # A catch-all for other specific OAuth2 errors from Authlib
-        return jsonify({"error": "oauth_error", "details": f"An OAuth2 error occurred: {e}"}), 401
+        return (
+            jsonify(
+                {"error": "oauth_error", "details": f"An OAuth2 error occurred: {e}"}
+            ),
+            401,
+        )
     except Exception as e:
         # A safety net for non-OAuth errors (e.g., network issues)
         return jsonify({"error": "unexpected_error", "details": str(e)}), 500
+
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
