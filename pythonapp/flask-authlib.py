@@ -235,10 +235,8 @@ def profile(claims):
 @app.route("/login", methods=["GET"])
 def login():
     """Initiates OpenID Connect login flow."""
-    # Combine registered scopes with the essential 'offline_access' scope
     base_scope = secrets.get("scope_request", "")
-    # Ensure 'offline_access' is included and handle potential whitespace
-    scope = " ".join(base_scope.split() + ["offline_access"])
+    scope = " ".join(base_scope.split())
     redirect_uri = url_for("authorize", _external=True)
     return oauth.dataone_oidc.authorize_redirect(
         redirect_uri, audience=secrets.get("client_id"), scope=scope
