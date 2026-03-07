@@ -265,20 +265,27 @@ def refresh_token():
     if not user_refresh_token:
         return jsonify({"error": "Missing refresh_token"}), 400
 
-    # The client should pass the scopes from its expired access token
-    # This is required because the scopes in this request must match the
-    # scopes of the original access token for the refresh to succeed using OIDC standards.
+    # The client should pass the scopes that it would like to request for the
+    # new access token. If no scopes are provided, we will attempt to get a
+    # new access token with the same scopes as the original token. The
+    # requested scopes must match or be a subset of the original scopes granted
+    # to the token, otherwise the OIDC provider will reject the request.
     requested_scope = data.get("scope")
-    if not requested_scope:
-        return jsonify({"error": "Missing scope parameter"}), 400
 
     # 2. Use Authlib to exchange the refresh token for a new access token
     try:
-        new_tokens = oauth.dataone_oidc.fetch_access_token(
-            grant_type="refresh_token",
-            refresh_token=user_refresh_token,
-            scope=requested_scope,
-        )
+        if not requested_scope:
+            # If no scope is provided, omit the scope parameter to get the same scopes as the original token
+            new_tokens = oauth.dataone_oidc.fetch_access_token(
+                grant_type="refresh_token",
+                refresh_token=user_refresh_token,
+            )
+        else:
+            new_tokens = oauth.dataone_oidc.fetch_access_token(
+                grant_type="refresh_token",
+                refresh_token=user_refresh_token,
+                scope=requested_scope,
+            )
 
         # 3. Return the new tokens (Access + Refresh) as JSON to the frontend
         return jsonify(new_tokens)
