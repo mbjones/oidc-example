@@ -216,7 +216,7 @@ wheels = [
 [[package]]
 name = "dataone-auth"
 version = "0.1.0"
-source = { git = "https://github.com/DataONEorg/dataone-auth.git?rev=feature-generalize-api#39f69ae36cd2b668bdd792491d5913c01ab99f2f" }
+source = { git = "https://github.com/DataONEorg/dataone-auth.git?rev=feature-generalize-api#789101ac8172c029007a60729024a420ba8e5108" }
 dependencies = [
     { name = "authlib" },
     { name = "flask" },
