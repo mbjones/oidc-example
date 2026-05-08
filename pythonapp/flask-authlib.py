@@ -19,7 +19,7 @@ from flask import redirect
 from flask import url_for
 from flask import current_app
 
-from dataone.auth import AuthFactory
+from dataone.auth import AuthFactory, AuthError, InsufficientScopeError
 from dataone.auth import load_client_secrets, extract_token_from_header
 
 from authlib.jose import jwt
@@ -35,6 +35,72 @@ from authlib.jose.errors import BadSignatureError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import logging
+
+def _auth_error_response(message, status, details=None):
+    """Generate a uniform JSON error response for authentication/authorization errors.
+
+    All auth-related error responses should use this helper to guarantee a consistent ``{"error": {"message": ..., "details": ...}}`` object.
+
+    Args:
+        message: Error description.
+        status: HTTP status code.
+        details: Optional additional context (``str(exc)``).  Omitted from the response when *None*.
+
+    Returns:
+        Tuple of (JSON response, status code).
+    """
+    error = {"message": message}
+    if details is not None:
+        error["details"] = details
+    return jsonify({"error": error}), status
+
+
+def _token_error_response(exc):
+    """Produce a uniform JSON error response for token validation/exchange failures."""
+    error_map = {
+        #DecodeError: ("Token decoding failed", 401),
+        #InvalidClientError: ("OIDC client authentication failed", 401),
+        #InvalidTokenError: ("Token validation failed", 401),
+        #InvalidGrantError: ("Invalid or expired refresh token", 401),
+        #BadSignatureError: ("Token signature verification failed", 401),
+        #OAuthError: ("Authorization failed", 401),
+        #OAuth2Error: ("An OAuth2 error occurred", 401),
+        KeyError: ("Invalid token structure", 401),
+        TypeError: ("Invalid token structure", 401),
+        #MissingParameterError: ("Missing required parameter", 400),
+        ValueError: ("OIDC provider configuration error", 500),
+        requests.RequestException: ("Failed to fetch OIDC provider keys", 502),
+        InsufficientScopeError: ("Insufficient permissions", 403)
+    }
+    for exc_types, (message, status) in error_map.items():
+        if isinstance(exc, exc_types):
+            return _auth_error_response(message, status, details=str(exc))
+    # Unexpected exception — treat as server error
+    return _auth_error_response("Internal authentication error", 500, details=str(exc))
+
+
+def _token_response(token: dict, message: str = "Token exchange successful"):
+    """Produce a uniform JSON response with access and refresh tokens.
+    
+    Args:
+        token: Dict containing token data with 'access_token' and 'refresh_token' keys.
+        message: Optional message to include in response.
+        
+    Returns:
+        Tuple of (JSON response, 200 status code).
+    """
+    return (
+        jsonify(
+            {
+                "message": message,
+                "token": {
+                    "access_token": token.get("access_token"),
+                    "refresh_token": token.get("refresh_token"),
+                },
+            }
+        ),
+        200,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +149,18 @@ def require_scope(required_scope: str, methods=None):
             auth_header = request.headers.get("Authorization", "")
             token = extract_token_from_header(auth_header)
 
-            claims, error = adapter.validate_and_extract_claims(token_str = token, required_scope=required_scope)
-            if error:
-                return error
+            if not token:
+                return jsonify({"error": "Missing or invalid Authorization header"}), 401
 
-            g.token_claims = claims
-            # Pass claims as keyword argument for explicit access in handlers
-            kwargs['claims'] = claims
-            return f(*args, **kwargs)
-
+            try:
+                claims = adapter.validate_and_extract_claims(
+                    token_str=token, 
+                    required_scope=required_scope
+                )
+                return f(*args, **kwargs, claims=claims)
+            except Exception as e:
+                return _token_error_response(e)
+    
         return decorated
 
     return decorator
@@ -289,70 +358,6 @@ def logout():
     # Optionally redirect to OIDC provider's logout endpoint
     return jsonify({"message": "Logged out successfully"}), 200
 
-def _auth_error_response(message, status, details=None):
-    """Generate a uniform JSON error response for authentication/authorization errors.
-
-    All auth-related error responses should use this helper to guarantee a consistent ``{"error": {"message": ..., "details": ...}}`` object.
-
-    Args:
-        message: Error description.
-        status: HTTP status code.
-        details: Optional additional context (``str(exc)``).  Omitted from the response when *None*.
-
-    Returns:
-        Tuple of (JSON response, status code).
-    """
-    error = {"message": message}
-    if details is not None:
-        error["details"] = details
-    return jsonify({"error": error}), status
-
-
-def _token_error_response(exc):
-    """Produce a uniform JSON error response for token validation/exchange failures."""
-    error_map = {
-        DecodeError: ("Token decoding failed", 401),
-        InvalidClientError: ("OIDC client authentication failed", 401),
-        InvalidTokenError: ("Token validation failed", 401),
-        InvalidGrantError: ("Invalid or expired refresh token", 401),
-        BadSignatureError: ("Token signature verification failed", 401),
-        OAuthError: ("Authorization failed", 401),
-        OAuth2Error: ("An OAuth2 error occurred", 401),
-        KeyError: ("Invalid token structure", 401),
-        TypeError: ("Invalid token structure", 401),
-        MissingParameterError: ("Missing required parameter", 400),
-        ValueError: ("OIDC provider configuration error", 500),
-        requests.RequestException: ("Failed to fetch OIDC provider keys", 502),
-    }
-    for exc_types, (message, status) in error_map.items():
-        if isinstance(exc, exc_types):
-            return _auth_error_response(message, status, details=str(exc))
-    # Unexpected exception — treat as server error
-    return _auth_error_response("Internal authentication error", 500, details=str(exc))
-
-
-def _token_response(token: dict, message: str = "Token exchange successful"):
-    """Produce a uniform JSON response with access and refresh tokens.
-    
-    Args:
-        token: Dict containing token data with 'access_token' and 'refresh_token' keys.
-        message: Optional message to include in response.
-        
-    Returns:
-        Tuple of (JSON response, 200 status code).
-    """
-    return (
-        jsonify(
-            {
-                "message": message,
-                "token": {
-                    "access_token": token.get("access_token"),
-                    "refresh_token": token.get("refresh_token"),
-                },
-            }
-        ),
-        200,
-    )
 
 
 if __name__ == "__main__":
