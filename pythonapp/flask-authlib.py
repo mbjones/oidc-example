@@ -17,7 +17,11 @@ from flask import request
 from flask import session
 from flask import redirect
 from flask import url_for
-from authlib.integrations.flask_client import OAuth
+from flask import current_app
+
+from dataone.auth import AuthFactory
+from dataone.auth import load_client_secrets, extract_token_from_header
+
 from authlib.jose import jwt
 from authlib.jose import JsonWebKey
 from authlib.jose.errors import InvalidTokenError
@@ -25,178 +29,70 @@ from authlib.jose.errors import DecodeError
 from authlib.oauth2.rfc6749.errors import (
     InvalidGrantError,
     InvalidClientError,
-    OAuth2Error,
+    OAuth2Error
 )
 from authlib.jose.errors import BadSignatureError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+import logging
 
-def load_client_secrets(filepath="./client_secrets.json"):
-    """Load and parse the client secrets JSON file.
-
-    Args:
-        filepath: Path to the client_secrets.json file
-
-    Returns:
-        dict: Parsed JSON content from the file
-
-    Raises:
-        FileNotFoundError: If the secrets file does not exist
-        json.JSONDecodeError: If the file is not valid JSON
-    """
-    with open(filepath, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+logger = logging.getLogger(__name__)
 
 # Start a Flask application and set its secret
 app = Flask(__name__)
 app.config.update({"SECRET_KEY": os.getenv("FLASK_SECRET_KEY", os.urandom(32).hex())})
 
-# Tell flask we are behind a proxy
-# x_proto=1 tells Flask to trust the X-Forwarded-Proto header
-# x_host=1 tells Flask to trust the X-Forwarded-Host header
-app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+try:
+    secrets = load_client_secrets()
+except (FileNotFoundError, json.JSONDecodeError) as exc:
+    logger.warning("Could not load client secrets (%s). Auth unavailable.", exc)
+if not isinstance(app.wsgi_app, ProxyFix):
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+scopes = []
+auth_client = AuthFactory.create_client("flask", secrets, scopes)
 
-# Configure your OIDC Provider (e.g., Keycloak)
-oauth = OAuth(app)
-secrets = load_client_secrets()
-oauth.register(
-    name="dataone_oidc",
-    client_id=secrets.get("client_id"),
-    client_secret=secrets.get("client_secret"),
-    server_metadata_url=secrets.get("server_metadata_url"),
-    client_kwargs={
-        # Set default scope to empty to manually control it in each request,
-        # preventing authlib from auto-stripping 'openid'.
-        "scope": "",
-        "token_endpoint_auth_method": "client_secret_post",
-    },
-)
+auth_client.init_app(app)
+
+# attach to app context so Flask routes can access it later
+app.extensions['dataone_auth'] = auth_client
+logger.info("OAuth client initialised.")
 
 
-# Fetch and cache JWKS keys from the OIDC provider's jwks_uri
-@functools.lru_cache(maxsize=1)
-def get_jwks_keys():
-    """Fetch and cache JWKS keys from the OIDC provider's jwks_uri."""
-    # Get the jwks_uri from server metadata
-    metadata = oauth.dataone_oidc.load_server_metadata()
-    jwks_uri = metadata.get("jwks_uri")
-
-    if not jwks_uri:
-        raise ValueError("OIDC provider metadata does not contain jwks_uri")
-
-    # Fetch JWKS from the provider
-    response = requests.get(jwks_uri, timeout=30)
-    response.raise_for_status()
-    jwks_data = response.json()
-
-    # Convert JWKS to JsonWebKey set for Authlib
-    return JsonWebKey.import_key_set(jwks_data)
-
-
-# Scope-based resource protection decorator
-def require_scope(required_scope):
-    """Decorator that protects endpoints by verifying OAuth 2.0 token scope."""
-
+def require_scope(required_scope: str, methods=None):
     def decorator(f):
         @functools.wraps(f)
-        def decorated_function(*args, **kwargs):
+        def decorated(*args, **kwargs):
+            #mode = get_access_mode()
+            
+            # In read_only or open mode, skip auth entirely
+            #if mode != ACCESS_MODE_AUTHENTICATED:
+            #    logger.warning("Access mode '%s': skipping scope validation", mode)
+            #    # Store None in g for consistency
+            #    g.token_claims = None
+            #    return f(*args, **kwargs)
+            
+            # If methods are specified, only enforce auth for those methods
+            if methods is not None and request.method not in methods:
+                # No auth required for this method; store None as claims
+                g.token_claims = None
+                return f(*args, **kwargs)
+            
+            adapter = current_app.extensions['dataone_auth']
 
-            # Extract token from Authorization header
+            # Framework specific: Extract the token
             auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
-                return (
-                    jsonify({"error": "Missing or invalid Authorization header"}),
-                    401,
-                )
+            token = extract_token_from_header(auth_header)
 
-            token_str = auth_header[7:]  # Remove 'Bearer ' prefix
+            claims, error = adapter.validate_and_extract_claims(token_str = token, required_scope=required_scope)
+            if error:
+                return error
 
-            try:
-                # Fetch JWKS signing keys from the OIDC provider's well-known endpoint
-                jwks = get_jwks_keys()
+            g.token_claims = claims
+            # Pass claims as keyword argument for explicit access in handlers
+            kwargs['claims'] = claims
+            return f(*args, **kwargs)
 
-                # Find the issuer from the server metadata
-                issuer = oauth.dataone_oidc.load_server_metadata().get("issuer")
-                metadata = oauth.dataone_oidc.load_server_metadata()
-                issuer = metadata.get("issuer")
-
-                # Decode and validate the JWT token using the signing keys
-                claims = jwt.decode(
-                    token_str,
-                    jwks,
-                    claims_options={
-                        "iss": {
-                            "essential": True,
-                            "value": issuer,
-                        },
-                        # "azp": {"essential": True, "value": secrets.get("client_id")},
-                    },
-                )
-                claims.validate()  # This checks exp, iat, iss, and aud
-
-                # Check for required scope
-                token_scope = claims.get("scope", "").split()
-                if required_scope not in token_scope:
-                    return (
-                        jsonify(
-                            {
-                                "error": f"Insufficient scope. Required: {required_scope}",
-                                "available_scopes": token_scope,
-                            }
-                        ),
-                        403,
-                    )
-
-                # Pass claims to the protected function
-                return f(claims, *args, **kwargs)
-            except DecodeError as e:
-                return (
-                    jsonify({"error": "Token decoding failed", "details": str(e)}),
-                    401,
-                )
-            except InvalidTokenError as e:
-                return (
-                    jsonify({"error": "Token validation failed", "details": str(e)}),
-                    401,
-                )
-            except BadSignatureError as e:
-                return (
-                    jsonify(
-                        {"error": "Token signature not verified", "details": str(e)}
-                    ),
-                    401,
-                )
-            except ValueError as e:
-                # Raised by get_jwks_keys() if jwks_uri is missing
-                return (
-                    jsonify(
-                        {
-                            "error": "OIDC provider configuration, no jwks_uri key found",
-                            "details": str(e),
-                        }
-                    ),
-                    500,
-                )
-            except requests.RequestException as e:
-                # Network or HTTP errors when fetching JWKS
-                return (
-                    jsonify(
-                        {
-                            "error": "Failed to fetch OIDC provider keys",
-                            "details": str(e),
-                        }
-                    ),
-                    502,
-                )
-            except (KeyError, TypeError) as e:
-                # Unexpected data structure in token claims
-                return (
-                    jsonify({"error": "Invalid token structure", "details": str(e)}),
-                    401,
-                )
-
-        return decorated_function
+        return decorated
 
     return decorator
 
@@ -234,36 +130,95 @@ def profile(claims):
 
 @app.route("/login", methods=["GET"])
 def login():
-    """Initiates OpenID Connect login flow."""
-    base_scope = secrets.get("scope_request", "")
-    scope = " ".join(base_scope.split())
-    redirect_uri = url_for("authorize", _external=True)
-    return oauth.dataone_oidc.authorize_redirect(
-        redirect_uri, audience=secrets.get("client_id"), scope=scope
-    )
+    """Initiate the OIDC login flow.
+
+    Sends the user to the provider's login page. After successful
+    authentication the provider redirects back to the ``/authorize``
+    callback.
+
+    Args:
+        (None)
+
+    Returns:
+        302 redirect to the provider's authorization endpoint.
+        401/500 JSON error response if login fails.
+        403 JSON response if authentication is disabled for the current access mode.
+
+    """
+    #mode = get_access_mode()
+    #if mode != ACCESS_MODE_AUTHENTICATED:
+    #    return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
+
+    adapter = current_app.extensions['dataone_auth']
+    oidc_client = adapter.vegbank_oidc # maybe get this dynamically
+
+    try:
+        return oidc_client.authorize_redirect(url_for("authorize", _external=True))
+    except (OAuth2Error, requests.RequestException) as exc:
+        logger.warning("OIDC authorize_redirect error: %s", exc)
+        return _token_error_response(exc)
+
 
 
 @app.route("/authorize", methods=["GET"])
 def authorize():
-    """Callback endpoint for OIDC authorization redirect."""
+    """OIDC authorization callback endpoint.
+
+    Keycloak redirects here after a successful login with a short-lived
+    authorization code. This endpoint exchanges that code for an access
+    token, stores the token and returns it to the caller.
+
+    Returns:
+        200 JSON with ``token`` on success.
+        401 JSON with error details on failure.
+        403 JSON response if authentication is disabled for the current access mode.
+    """
+    #mode = get_access_mode()
+    #if mode != ACCESS_MODE_AUTHENTICATED:
+    #    return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
+
+    adapter = current_app.extensions.get('dataone_auth')
+    oidc_client = adapter.vegbank_oidc
+
     try:
-        token = oauth.dataone_oidc.authorize_access_token()
-        session["token"] = token
-        session["userinfo"] = token.get("userinfo", {})
-        return redirect(url_for("dashboard"))
-    except Exception as e:
-        return jsonify({"error": "Authorization failed", "details": str(e)}), 401
+        token = oidc_client.authorize_access_token()
+    except (OAuth2Error, RequestException) as exc:
+        logger.debug("OIDC token exchange error: %s", exc)
+        return _token_error_response(exc)
+
+    return _token_response(token, message="Authorization successful")
 
 
 @app.route("/refresh", methods=["POST"])
 def refresh_token():
-    """Re-validate the user session and return a new access token using the refresh token."""
-    # 1. Get the refresh token and desired scopes from the frontend JSON body
-    data = request.get_json()
+    """Re-validate the user session and return a new access token using the refresh token.
+
+    When an access token expires, the client can call this endpoint with the refresh token 
+    to obtain a new access token without requiring the user to log in again. The client 
+    can also pass the desired scopes for the new access token, which must be a subset 
+    of the original scopes granted to the refresh token.
+
+    Parameters (in JSON body):
+    - ``refresh_token`` (string, required): The refresh token issued by the OIDC provider.
+    - ``scope`` (string, optional): Space-separated list of scopes to request for the new access token. If omitted, the new access token will have the same scopes as the original token.
+
+    Returns:
+    200 JSON with new ``access_token`` and ``refresh_token`` on success.
+    400 JSON if the request is missing required parameters.
+    401 JSON if the refresh token is invalid, expired, or if client authentication fails.
+    500 JSON for unexpected server errors.
+    """
+
+    adapter = current_app.extensions.get('dataone_auth')
+
+    # Get the refresh token and desired scopes from the JSON body
+    data = request.get_json(silent=True)
+    if not data:
+        return _token_error_response(MissingParameterError("refresh_token"))
 
     user_refresh_token = data.get("refresh_token")
     if not user_refresh_token:
-        return jsonify({"error": "Missing refresh_token"}), 400
+        return _token_error_response(MissingParameterError("refresh_token"))
 
     # The client should pass the scopes that it would like to request for the
     # new access token. If no scopes are provided, we will attempt to get a
@@ -272,56 +227,37 @@ def refresh_token():
     # to the token, otherwise the OIDC provider will reject the request.
     requested_scope = data.get("scope")
 
-    # 2. Use Authlib to exchange the refresh token for a new access token
+    # Use Authlib to exchange the refresh token for a new access token
     try:
+        oidc_client = adapter.vegbank_oidc # maybe get this dynamically
         if not requested_scope:
             # If no scope is provided, omit the scope parameter to get the same scopes as the original token
-            new_tokens = oauth.dataone_oidc.fetch_access_token(
+            new_tokens = oidc_client.fetch_access_token(
                 grant_type="refresh_token",
                 refresh_token=user_refresh_token,
             )
         else:
-            new_tokens = oauth.dataone_oidc.fetch_access_token(
+            new_tokens = oidc_client.fetch_access_token(
                 grant_type="refresh_token",
                 refresh_token=user_refresh_token,
                 scope=requested_scope,
             )
-
-        # 3. Return the new tokens (Access + Refresh) as JSON to the frontend
-        return jsonify(new_tokens)
-    except InvalidGrantError:
+        return _token_response(new_tokens, message="Authorization successful")
+    except InvalidGrantError as exc:
         # The refresh token was invalid, expired, or revoked by the provider
-        return (
-            jsonify(
-                {
-                    "error": "invalid_grant",
-                    "details": "The refresh token is invalid or expired.",
-                }
-            ),
-            401,
-        )
-    except InvalidClientError:
+        logger.debug("The refresh token is invalid or expired: %s", exc)
+        return _token_error_response(exc)
+    except InvalidClientError as exc:
         # The client_id or client_secret is wrong
-        return (
-            jsonify(
-                {
-                    "error": "invalid_client",
-                    "details": "OIDC client authentication failed.",
-                }
-            ),
-            401,
-        )
-    except OAuth2Error as e:
-        # A catch-all for other specific OAuth2 errors from Authlib
-        return (
-            jsonify(
-                {"error": "oauth_error", "details": f"An OAuth2 error occurred: {e}"}
-            ),
-            401,
-        )
-    except Exception as e:
+        logger.warning("OIDC client authentication failed: %s", exc)
+        return _token_error_response(exc)
+    except OAuth2Error as exc:
+        logger.debug("An OAuth2 error occurred: %s", exc)
+        return _token_error_response(exc)
+    except Exception as exc:
         # A safety net for non-OAuth errors (e.g., network issues)
-        return jsonify({"error": "unexpected_error", "details": str(e)}), 500
+        logger.error("Unexpected Exception during refresh: %s", exc, exc_info=True)
+        return _token_error_response(exc)
 
 
 @app.route("/dashboard", methods=["GET"])
@@ -346,13 +282,77 @@ def dashboard():
         200,
     )
 
-
 @app.route("/logout", methods=["GET"])
 def logout():
     """Clears the user session."""
     session.clear()
     # Optionally redirect to OIDC provider's logout endpoint
     return jsonify({"message": "Logged out successfully"}), 200
+
+def _auth_error_response(message, status, details=None):
+    """Generate a uniform JSON error response for authentication/authorization errors.
+
+    All auth-related error responses should use this helper to guarantee a consistent ``{"error": {"message": ..., "details": ...}}`` object.
+
+    Args:
+        message: Error description.
+        status: HTTP status code.
+        details: Optional additional context (``str(exc)``).  Omitted from the response when *None*.
+
+    Returns:
+        Tuple of (JSON response, status code).
+    """
+    error = {"message": message}
+    if details is not None:
+        error["details"] = details
+    return jsonify({"error": error}), status
+
+
+def _token_error_response(exc):
+    """Produce a uniform JSON error response for token validation/exchange failures."""
+    error_map = {
+        DecodeError: ("Token decoding failed", 401),
+        InvalidClientError: ("OIDC client authentication failed", 401),
+        InvalidTokenError: ("Token validation failed", 401),
+        InvalidGrantError: ("Invalid or expired refresh token", 401),
+        BadSignatureError: ("Token signature verification failed", 401),
+        OAuthError: ("Authorization failed", 401),
+        OAuth2Error: ("An OAuth2 error occurred", 401),
+        KeyError: ("Invalid token structure", 401),
+        TypeError: ("Invalid token structure", 401),
+        MissingParameterError: ("Missing required parameter", 400),
+        ValueError: ("OIDC provider configuration error", 500),
+        requests.RequestException: ("Failed to fetch OIDC provider keys", 502),
+    }
+    for exc_types, (message, status) in error_map.items():
+        if isinstance(exc, exc_types):
+            return _auth_error_response(message, status, details=str(exc))
+    # Unexpected exception — treat as server error
+    return _auth_error_response("Internal authentication error", 500, details=str(exc))
+
+
+def _token_response(token: dict, message: str = "Token exchange successful"):
+    """Produce a uniform JSON response with access and refresh tokens.
+    
+    Args:
+        token: Dict containing token data with 'access_token' and 'refresh_token' keys.
+        message: Optional message to include in response.
+        
+    Returns:
+        Tuple of (JSON response, 200 status code).
+    """
+    return (
+        jsonify(
+            {
+                "message": message,
+                "token": {
+                    "access_token": token.get("access_token"),
+                    "refresh_token": token.get("refresh_token"),
+                },
+            }
+        ),
+        200,
+    )
 
 
 if __name__ == "__main__":
