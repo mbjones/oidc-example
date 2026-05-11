@@ -160,14 +160,14 @@ def require_scope(required_scope: str, methods=None):
                 return f(*args, **kwargs, claims=claims)
             except Exception as e:
                 return _token_error_response(e)
-    
+
         return decorated
 
     return decorator
 
 
 @app.route("/profile", methods=["GET"])
-@require_scope("vegbank:contributor")
+@require_scope("openid")
 def profile(claims):
     """Protected resource endpoint that requires 'profile' scope."""
     return (
