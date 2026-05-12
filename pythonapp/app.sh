@@ -10,4 +10,3 @@ uv sync --active
 
 echo "Starting app..."
 python flask-authlib.py
-#python app.py

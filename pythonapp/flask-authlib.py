@@ -9,29 +9,33 @@ Call with: curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:4000/prof
 import json
 import functools
 import os
-import requests
+from requests import RequestException
 
-from flask import Flask
-from flask import jsonify
-from flask import request
-from flask import session
-from flask import redirect
-from flask import url_for
-from flask import current_app
+from flask import (
+    Flask,
+    jsonify,
+    request,
+    session,
+    redirect,
+    url_for,
+    current_app,
+    g
+)
 
-from dataone.auth import AuthFactory, AuthError, InsufficientScopeError
-from dataone.auth import load_client_secrets, extract_token_from_header
+from dataone.auth import (
+    AuthFactory,
+    load_client_secrets,
+    extract_token_from_header,
+    InsufficientScopeError,
+    MissingParameterError
+)
 
-from authlib.jose import jwt
-from authlib.jose import JsonWebKey
-from authlib.jose.errors import InvalidTokenError
-from authlib.jose.errors import DecodeError
 from authlib.oauth2.rfc6749.errors import (
     InvalidGrantError,
     InvalidClientError,
     OAuth2Error
 )
-from authlib.jose.errors import BadSignatureError
+import authlib.integrations.base_client.errors as base_client_errors
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import logging
@@ -69,7 +73,7 @@ def _token_error_response(exc):
         TypeError: ("Invalid token structure", 401),
         #MissingParameterError: ("Missing required parameter", 400),
         ValueError: ("OIDC provider configuration error", 500),
-        requests.RequestException: ("Failed to fetch OIDC provider keys", 502),
+        RequestException: ("Failed to fetch OIDC provider keys", 502),
         InsufficientScopeError: ("Insufficient permissions", 403)
     }
     for exc_types, (message, status) in error_map.items():
@@ -112,9 +116,11 @@ try:
     secrets = load_client_secrets()
 except (FileNotFoundError, json.JSONDecodeError) as exc:
     logger.warning("Could not load client secrets (%s). Auth unavailable.", exc)
+    
 if not isinstance(app.wsgi_app, ProxyFix):
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
-scopes = []
+
+scopes = ["ogdc:admin"]
 auth_client = AuthFactory.create_client("flask", secrets, scopes)
 
 auth_client.init_app(app)
@@ -128,14 +134,14 @@ def require_scope(required_scope: str, methods=None):
     def decorator(f):
         @functools.wraps(f)
         def decorated(*args, **kwargs):
-            #mode = get_access_mode()
+            mode = get_access_mode()
             
             # In read_only or open mode, skip auth entirely
-            #if mode != ACCESS_MODE_AUTHENTICATED:
-            #    logger.warning("Access mode '%s': skipping scope validation", mode)
-            #    # Store None in g for consistency
-            #    g.token_claims = None
-            #    return f(*args, **kwargs)
+            if mode != ACCESS_MODE_AUTHENTICATED:
+                logger.warning("Access mode '%s': skipping scope validation", mode)
+                # Store None in g for consistency
+                g.token_claims = None
+                return f(*args, **kwargs)
             
             # If methods are specified, only enforce auth for those methods
             if methods is not None and request.method not in methods:
@@ -167,7 +173,7 @@ def require_scope(required_scope: str, methods=None):
 
 
 @app.route("/profile", methods=["GET"])
-@require_scope("openid")
+@require_scope("ogdc:admin")
 def profile(claims):
     """Protected resource endpoint that requires 'profile' scope."""
     return (
@@ -214,16 +220,15 @@ def login():
         403 JSON response if authentication is disabled for the current access mode.
 
     """
-    #mode = get_access_mode()
-    #if mode != ACCESS_MODE_AUTHENTICATED:
-    #    return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
+    mode = get_access_mode()
+    if mode != ACCESS_MODE_AUTHENTICATED:
+        return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
 
     adapter = current_app.extensions['dataone_auth']
-    oidc_client = adapter.vegbank_oidc # maybe get this dynamically
-
+    oidc_client = adapter.dataone_oidc # maybe get this dynamically
     try:
         return oidc_client.authorize_redirect(url_for("authorize", _external=True))
-    except (OAuth2Error, requests.RequestException) as exc:
+    except (base_client_errors.OAuthError, RequestException) as exc:
         logger.warning("OIDC authorize_redirect error: %s", exc)
         return _token_error_response(exc)
 
@@ -247,11 +252,11 @@ def authorize():
     #    return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
 
     adapter = current_app.extensions.get('dataone_auth')
-    oidc_client = adapter.vegbank_oidc
+    oidc_client = adapter.dataone_oidc
 
     try:
         token = oidc_client.authorize_access_token()
-    except (OAuth2Error, RequestException) as exc:
+    except (base_client_errors.OAuthError, RequestException) as exc:
         logger.debug("OIDC token exchange error: %s", exc)
         return _token_error_response(exc)
 
@@ -289,16 +294,11 @@ def refresh_token():
     if not user_refresh_token:
         return _token_error_response(MissingParameterError("refresh_token"))
 
-    # The client should pass the scopes that it would like to request for the
-    # new access token. If no scopes are provided, we will attempt to get a
-    # new access token with the same scopes as the original token. The
-    # requested scopes must match or be a subset of the original scopes granted
-    # to the token, otherwise the OIDC provider will reject the request.
     requested_scope = data.get("scope")
 
     # Use Authlib to exchange the refresh token for a new access token
     try:
-        oidc_client = adapter.vegbank_oidc # maybe get this dynamically
+        oidc_client = adapter.dataone_oidc # maybe get this dynamically
         if not requested_scope:
             # If no scope is provided, omit the scope parameter to get the same scopes as the original token
             new_tokens = oidc_client.fetch_access_token(
@@ -327,38 +327,6 @@ def refresh_token():
         # A safety net for non-OAuth errors (e.g., network issues)
         logger.error("Unexpected Exception during refresh: %s", exc, exc_info=True)
         return _token_error_response(exc)
-
-
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    """User dashboard showing authenticated user info."""
-    userinfo = session.get("userinfo")
-    if not userinfo:
-        return redirect(url_for("login"))
-
-    return (
-        jsonify(
-            {
-                "message": f"Welcome, {userinfo.get('name', 'User')}!",
-                "user": {
-                    "name": userinfo.get("name"),
-                    "email": userinfo.get("email"),
-                    "sub": userinfo.get("sub"),
-                },
-                "token": session.get("token"),
-            }
-        ),
-        200,
-    )
-
-@app.route("/logout", methods=["GET"])
-def logout():
-    """Clears the user session."""
-    session.clear()
-    # Optionally redirect to OIDC provider's logout endpoint
-    return jsonify({"message": "Logged out successfully"}), 200
-
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int("4000"), debug=True)
