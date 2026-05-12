@@ -15,8 +15,6 @@ from flask import (
     Flask,
     jsonify,
     request,
-    session,
-    redirect,
     url_for,
     current_app,
     g
@@ -26,6 +24,7 @@ from dataone.auth import (
     AuthFactory,
     load_client_secrets,
     extract_token_from_header,
+    get_access_mode,
     InsufficientScopeError,
     MissingParameterError
 )
@@ -106,6 +105,7 @@ def _token_response(token: dict, message: str = "Token exchange successful"):
         200,
     )
 
+ACCESS_MODE_AUTHENTICATED = "authenticated"
 logger = logging.getLogger(__name__)
 
 # Start a Flask application and set its secret
@@ -247,9 +247,9 @@ def authorize():
         401 JSON with error details on failure.
         403 JSON response if authentication is disabled for the current access mode.
     """
-    #mode = get_access_mode()
-    #if mode != ACCESS_MODE_AUTHENTICATED:
-    #    return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
+    mode = get_access_mode()
+    if mode != ACCESS_MODE_AUTHENTICATED:
+        return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
 
     adapter = current_app.extensions.get('dataone_auth')
     oidc_client = adapter.dataone_oidc
