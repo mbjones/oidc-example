@@ -9,7 +9,6 @@ Call with: curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:4000/prof
 import json
 import functools
 import os
-from requests import RequestException
 
 from flask import (
     Flask,
@@ -27,7 +26,6 @@ from dataone.auth import (
     get_access_mode,
 )
 
-import authlib.integrations.base_client.errors as base_client_errors
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import logging
@@ -125,108 +123,18 @@ def profile(claims):
         200,
     )
 
-
-@app.route("/login", methods=["GET"])
+@app.route("/login")
 def login():
-    """Initiate the OIDC login flow.
+    return auth_client.login(redirect_uri=url_for("authorize", _external=True))
 
-    Sends the user to the provider's login page. After successful
-    authentication the provider redirects back to the ``/authorize``
-    callback.
-
-    Args:
-        (None)
-
-    Returns:
-        302 redirect to the provider's authorization endpoint.
-        401/500 JSON error response if login fails.
-        403 JSON response if authentication is disabled for the current access mode.
-
-    """
-    auth_adapter = current_app.extensions['dataone_auth']
-    oidc_client = auth_adapter.dataone_oidc # maybe get this dynamically
-    try:
-        return oidc_client.authorize_redirect(url_for("authorize", _external=True))
-    except Exception as exc:
-        logger.warning("OIDC authorize_redirect error: %s", exc)
-        return auth_adapter.error_handler(exc)
-
-
-
-@app.route("/authorize", methods=["GET"])
+@app.route("/authorize")
 def authorize():
-    """OIDC authorization callback endpoint.
-
-    Keycloak redirects here after a successful login with a short-lived
-    authorization code. This endpoint exchanges that code for an access
-    token, stores the token and returns it to the caller.
-
-    Returns:
-        200 JSON with ``token`` on success.
-        401 JSON with error details on failure.
-        403 JSON response if authentication is disabled for the current access mode.
-    """
-    auth_adapter = current_app.extensions.get('dataone_auth')
-    oidc_client = auth_adapter.dataone_oidc
-
-    try:
-        token = oidc_client.authorize_access_token()
-    except (base_client_errors.OAuthError, RequestException) as exc:
-        logger.debug("OIDC token exchange error: %s", exc)
-        return auth_adapter.error_handler(exc)
-
-    return auth_adapter.token_response(token = token)
-
+    return auth_client.authorize()
 
 @app.route("/refresh", methods=["POST"])
 def refresh_token():
-    """Re-validate the user session and return a new access token using the refresh token.
+    return auth_client.refresh(request_json=request.get_json(silent=True))
 
-    When an access token expires, the client can call this endpoint with the refresh token 
-    to obtain a new access token without requiring the user to log in again. The client 
-    can also pass the desired scopes for the new access token, which must be a subset 
-    of the original scopes granted to the refresh token.
-
-    Parameters (in JSON body):
-    - ``refresh_token`` (string, required): The refresh token issued by the OIDC provider.
-    - ``scope`` (string, optional): Space-separated list of scopes to request for the new access token. If omitted, the new access token will have the same scopes as the original token.
-
-    Returns:
-    200 JSON with new ``access_token`` and ``refresh_token`` on success.
-    400 JSON if the request is missing required parameters.
-    401 JSON if the refresh token is invalid, expired, or if client authentication fails.
-    500 JSON for unexpected server errors.
-    """
-
-    auth_adapter = current_app.extensions.get('dataone_auth')
-
-    # Get the refresh token and desired scopes from the JSON body
-    data = request.get_json(silent=True)
-
-    user_refresh_token = data.get("refresh_token")
-
-    requested_scope = data.get("scope")
-
-    # Use Authlib to exchange the refresh token for a new access token
-    try:
-        oidc_client = auth_adapter.dataone_oidc # maybe get this dynamically
-        if not requested_scope:
-            # If no scope is provided, omit the scope parameter to get the same scopes as the original token
-            new_tokens = oidc_client.fetch_access_token(
-                grant_type="refresh_token",
-                refresh_token=user_refresh_token,
-            )
-            return auth_adapter.token_response(new_tokens, message="Authorization successful")
-        else:
-            new_tokens = oidc_client.fetch_access_token(
-                grant_type="refresh_token",
-                refresh_token=user_refresh_token,
-                scope=requested_scope,
-            )
-            return auth_adapter.token_response(new_tokens, message="Authorization successful")
-
-    except Exception as exc:
-        return auth_adapter.error_handler(exc)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int("4000"), debug=True)

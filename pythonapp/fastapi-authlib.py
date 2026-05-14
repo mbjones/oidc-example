@@ -81,29 +81,22 @@ class RefreshRequest(BaseModel):
 
 @app.get("/login")
 async def login(request: Request):
-    """Initiate OIDC login flow."""
-    # Build redirect_uri using request.url_for
-    redirect_uri = request.url_for("authorize")
-    try:
-        return await oidc_client.authorize_redirect(request, str(redirect_uri))
-    except Exception as exc:
-        logger.warning("OIDC authorize_redirect error: %s", exc)
-        return auth_adapter.error_handler(exc)
+    # One line: Redirect to Keycloak
+    return await auth_adapter.login(
+        request=request,
+        redirect_uri=str(request.url_for("authorize"))
+    )
 
 @app.get("/authorize")
 async def authorize(request: Request):
-    """OIDC callback."""
-    try:
-        token = await oidc_client.authorize_access_token(request)
-        return {
-            "message": "Authorization successful",
-            "token": {
-                "access_token": token.get("access_token"),
-                "refresh_token": token.get("refresh_token"),
-            }
-        }
-    except Exception as exc:
-        return auth_adapter.error_handler(exc)
+    # One line: Exchange code for token and return JSON
+    return await auth_adapter.authorize(request=request)
+
+@app.post("/refresh")
+async def refresh(request: Request):
+    # One line: Extract body, refresh, and return JSON
+    body = await request.json()
+    return await auth_adapter.refresh(body)
 
 class ProfileResponse(BaseModel):
     sub: str
@@ -139,24 +132,6 @@ async def profile(claims: Optional[dict] = Depends(validate_scope("ogdc:admin"))
         "message": f"Authorization succeeded, {claims.get('name', 'User')}",
         "claims": profile_data.model_dump()
     }
-
-@app.post("/refresh")
-async def refresh_token(body: RefreshRequest):
-    """Refresh token exchange."""
-    try:
-        kwargs = {
-            "grant_type": "refresh_token",
-            "refresh_token": body.refresh_token,
-        }
-        if body.scope:
-            kwargs["scope"] = body.scope
-
-        new_tokens = await oidc_client.fetch_access_token(**kwargs)
-        
-        return auth_adapter.token_response(token = new_tokens)
-    except Exception as exc:
-        logger.error("Unexpected Exception during refresh: %s", exc, exc_info=True)
-        return auth_adapter.error_handler(exc)
 
 if __name__ == "__main__":
     import uvicorn
