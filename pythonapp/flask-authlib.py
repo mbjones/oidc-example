@@ -25,85 +25,13 @@ from dataone.auth import (
     load_client_secrets,
     extract_token_from_header,
     get_access_mode,
-    InsufficientScopeError,
-    MissingParameterError
 )
 
-from authlib.oauth2.rfc6749.errors import (
-    InvalidGrantError,
-    InvalidClientError,
-    OAuth2Error
-)
 import authlib.integrations.base_client.errors as base_client_errors
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import logging
 
-def _auth_error_response(message, status, details=None):
-    """Generate a uniform JSON error response for authentication/authorization errors.
-
-    All auth-related error responses should use this helper to guarantee a consistent ``{"error": {"message": ..., "details": ...}}`` object.
-
-    Args:
-        message: Error description.
-        status: HTTP status code.
-        details: Optional additional context (``str(exc)``).  Omitted from the response when *None*.
-
-    Returns:
-        Tuple of (JSON response, status code).
-    """
-    error = {"message": message}
-    if details is not None:
-        error["details"] = details
-    return jsonify({"error": error}), status
-
-
-def _token_error_response(exc):
-    """Produce a uniform JSON error response for token validation/exchange failures."""
-    error_map = {
-        #DecodeError: ("Token decoding failed", 401),
-        #InvalidClientError: ("OIDC client authentication failed", 401),
-        #InvalidTokenError: ("Token validation failed", 401),
-        #InvalidGrantError: ("Invalid or expired refresh token", 401),
-        #BadSignatureError: ("Token signature verification failed", 401),
-        #OAuthError: ("Authorization failed", 401),
-        #OAuth2Error: ("An OAuth2 error occurred", 401),
-        KeyError: ("Invalid token structure", 401),
-        TypeError: ("Invalid token structure", 401),
-        #MissingParameterError: ("Missing required parameter", 400),
-        ValueError: ("OIDC provider configuration error", 500),
-        RequestException: ("Failed to fetch OIDC provider keys", 502),
-        InsufficientScopeError: ("Insufficient permissions", 403)
-    }
-    for exc_types, (message, status) in error_map.items():
-        if isinstance(exc, exc_types):
-            return _auth_error_response(message, status, details=str(exc))
-    # Unexpected exception — treat as server error
-    return _auth_error_response("Internal authentication error", 500, details=str(exc))
-
-
-def _token_response(token: dict, message: str = "Token exchange successful"):
-    """Produce a uniform JSON response with access and refresh tokens.
-    
-    Args:
-        token: Dict containing token data with 'access_token' and 'refresh_token' keys.
-        message: Optional message to include in response.
-        
-    Returns:
-        Tuple of (JSON response, 200 status code).
-    """
-    return (
-        jsonify(
-            {
-                "message": message,
-                "token": {
-                    "access_token": token.get("access_token"),
-                    "refresh_token": token.get("refresh_token"),
-                },
-            }
-        ),
-        200,
-    )
 
 ACCESS_MODE_AUTHENTICATED = "authenticated"
 logger = logging.getLogger(__name__)
@@ -149,26 +77,21 @@ def require_scope(required_scope: str, methods=None):
                 g.token_claims = None
                 return f(*args, **kwargs)
             
-            adapter = current_app.extensions['dataone_auth']
-
-            # Framework specific: Extract the token
-            auth_header = request.headers.get("Authorization", "")
-            token = extract_token_from_header(auth_header)
-
-            if not token:
-                return jsonify({"error": "Missing or invalid Authorization header"}), 401
+            auth_adapter = current_app.extensions['dataone_auth']
 
             try:
-                claims = adapter.validate_and_extract_claims(
+                # Framework specific: Extract the token
+                auth_header = request.headers.get("Authorization", "")
+                token = extract_token_from_header(auth_header)
+                claims = auth_adapter.validate_and_extract_claims(
                     token_str=token, 
                     required_scope=required_scope
                 )
                 return f(*args, **kwargs, claims=claims)
             except Exception as e:
-                return _token_error_response(e)
+                return auth_adapter.error_handler(e)
 
         return decorated
-
     return decorator
 
 
@@ -220,17 +143,13 @@ def login():
         403 JSON response if authentication is disabled for the current access mode.
 
     """
-    mode = get_access_mode()
-    if mode != ACCESS_MODE_AUTHENTICATED:
-        return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
-
-    adapter = current_app.extensions['dataone_auth']
-    oidc_client = adapter.dataone_oidc # maybe get this dynamically
+    auth_adapter = current_app.extensions['dataone_auth']
+    oidc_client = auth_adapter.dataone_oidc # maybe get this dynamically
     try:
         return oidc_client.authorize_redirect(url_for("authorize", _external=True))
-    except (base_client_errors.OAuthError, RequestException) as exc:
+    except Exception as exc:
         logger.warning("OIDC authorize_redirect error: %s", exc)
-        return _token_error_response(exc)
+        return auth_adapter.error_handler(exc)
 
 
 
@@ -247,20 +166,16 @@ def authorize():
         401 JSON with error details on failure.
         403 JSON response if authentication is disabled for the current access mode.
     """
-    mode = get_access_mode()
-    if mode != ACCESS_MODE_AUTHENTICATED:
-        return _auth_error_response(f"Authentication is disabled in '{mode}' mode.", 403)
-
-    adapter = current_app.extensions.get('dataone_auth')
-    oidc_client = adapter.dataone_oidc
+    auth_adapter = current_app.extensions.get('dataone_auth')
+    oidc_client = auth_adapter.dataone_oidc
 
     try:
         token = oidc_client.authorize_access_token()
     except (base_client_errors.OAuthError, RequestException) as exc:
         logger.debug("OIDC token exchange error: %s", exc)
-        return _token_error_response(exc)
+        return auth_adapter.error_handler(exc)
 
-    return _token_response(token, message="Authorization successful")
+    return auth_adapter.token_response(token = token)
 
 
 @app.route("/refresh", methods=["POST"])
@@ -283,50 +198,35 @@ def refresh_token():
     500 JSON for unexpected server errors.
     """
 
-    adapter = current_app.extensions.get('dataone_auth')
+    auth_adapter = current_app.extensions.get('dataone_auth')
 
     # Get the refresh token and desired scopes from the JSON body
     data = request.get_json(silent=True)
-    if not data:
-        return _token_error_response(MissingParameterError("refresh_token"))
 
     user_refresh_token = data.get("refresh_token")
-    if not user_refresh_token:
-        return _token_error_response(MissingParameterError("refresh_token"))
 
     requested_scope = data.get("scope")
 
     # Use Authlib to exchange the refresh token for a new access token
     try:
-        oidc_client = adapter.dataone_oidc # maybe get this dynamically
+        oidc_client = auth_adapter.dataone_oidc # maybe get this dynamically
         if not requested_scope:
             # If no scope is provided, omit the scope parameter to get the same scopes as the original token
             new_tokens = oidc_client.fetch_access_token(
                 grant_type="refresh_token",
                 refresh_token=user_refresh_token,
             )
+            return auth_adapter.token_response(new_tokens, message="Authorization successful")
         else:
             new_tokens = oidc_client.fetch_access_token(
                 grant_type="refresh_token",
                 refresh_token=user_refresh_token,
                 scope=requested_scope,
             )
-        return _token_response(new_tokens, message="Authorization successful")
-    except InvalidGrantError as exc:
-        # The refresh token was invalid, expired, or revoked by the provider
-        logger.debug("The refresh token is invalid or expired: %s", exc)
-        return _token_error_response(exc)
-    except InvalidClientError as exc:
-        # The client_id or client_secret is wrong
-        logger.warning("OIDC client authentication failed: %s", exc)
-        return _token_error_response(exc)
-    except OAuth2Error as exc:
-        logger.debug("An OAuth2 error occurred: %s", exc)
-        return _token_error_response(exc)
+            return auth_adapter.token_response(new_tokens, message="Authorization successful")
+
     except Exception as exc:
-        # A safety net for non-OAuth errors (e.g., network issues)
-        logger.error("Unexpected Exception during refresh: %s", exc, exc_info=True)
-        return _token_error_response(exc)
+        return auth_adapter.error_handler(exc)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int("4000"), debug=True)
