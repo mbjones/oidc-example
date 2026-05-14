@@ -3,16 +3,15 @@ import logging
 import json
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, Request, Depends
+from fastapi.security import HTTPBearer
 from starlette.middleware.sessions import SessionMiddleware
 
 # Authlib Starlette integration
 
 from dataone.auth import (
     AuthFactory,
-    load_client_secrets,
-    get_access_mode
+    load_client_secrets
 )
 
 from pydantic import BaseModel
@@ -40,39 +39,6 @@ oidc_client = auth_adapter.dataone_oidc
 
 
 security = HTTPBearer()
-
-def validate_scope(required_scope: str, methods=None):
-    """Factory for scope validation dependencies."""
-    async def scope_checker(
-        request: Request,
-        auth: Optional[HTTPAuthorizationCredentials] = Depends(security)
-    ):
-        mode = get_access_mode()
-        
-        if mode != ACCESS_MODE_AUTHENTICATED:
-            logger.warning("Access mode '%s': skipping scope validation", mode)
-            return None
-
-        if methods is not None and request.method not in methods:
-            return None
-        
-        if not auth or not auth.credentials:
-            raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-
-        try:
-            claims = await auth_adapter.validate_and_extract_claims(
-                token_str=auth.credentials, 
-                required_scope=required_scope
-            )
-            return claims
-        except Exception as e:
-            error_response = auth_adapter.error_handler(e)
-            raise HTTPException(
-                status_code=error_response.status_code,
-                detail=json.loads(error_response.body.decode())["error"]
-            )
-    return scope_checker
-
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -116,7 +82,7 @@ class ProfileResponse(BaseModel):
     family_name: Optional[str] = None
 
 @app.get("/profile")
-async def profile(claims: Optional[dict] = Depends(validate_scope("ogdc:admin"))):
+async def profile(claims: Optional[dict] = Depends(auth_adapter.require_scope("ogdc:admin"))):
     """
     Protected resource endpoint.
     """

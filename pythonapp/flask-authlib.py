@@ -7,23 +7,18 @@ Call with: curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:4000/prof
 """
 
 import json
-import functools
 import os
 
 from flask import (
     Flask,
     jsonify,
     request,
-    url_for,
-    current_app,
-    g
+    url_for
 )
 
 from dataone.auth import (
     AuthFactory,
     load_client_secrets,
-    extract_token_from_header,
-    get_access_mode,
 )
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -55,46 +50,8 @@ auth_client.init_app(app)
 app.extensions['dataone_auth'] = auth_client
 logger.info("OAuth client initialised.")
 
-
-def require_scope(required_scope: str, methods=None):
-    def decorator(f):
-        @functools.wraps(f)
-        def decorated(*args, **kwargs):
-            mode = get_access_mode()
-            
-            # In read_only or open mode, skip auth entirely
-            if mode != ACCESS_MODE_AUTHENTICATED:
-                logger.warning("Access mode '%s': skipping scope validation", mode)
-                # Store None in g for consistency
-                g.token_claims = None
-                return f(*args, **kwargs)
-            
-            # If methods are specified, only enforce auth for those methods
-            if methods is not None and request.method not in methods:
-                # No auth required for this method; store None as claims
-                g.token_claims = None
-                return f(*args, **kwargs)
-            
-            auth_adapter = current_app.extensions['dataone_auth']
-
-            try:
-                # Framework specific: Extract the token
-                auth_header = request.headers.get("Authorization", "")
-                token = extract_token_from_header(auth_header)
-                claims = auth_adapter.validate_and_extract_claims(
-                    token_str=token, 
-                    required_scope=required_scope
-                )
-                return f(*args, **kwargs, claims=claims)
-            except Exception as e:
-                return auth_adapter.error_handler(e)
-
-        return decorated
-    return decorator
-
-
 @app.route("/profile", methods=["GET"])
-@require_scope("ogdc:admin")
+@auth_client.require_scope("ogdc:admin")
 def profile(claims):
     """Protected resource endpoint that requires 'profile' scope."""
     return (
