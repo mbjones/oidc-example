@@ -1,3 +1,11 @@
+"""
+A simple FastAPI application demonstrating OpenID Connect (OIDC) authentication
+using the authlib library against a keycloak server. The application includes
+only routes for accessing protected resources using only a token.
+
+Call with: curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:4000/profile
+"""
+
 import json
 import logging
 import os
