@@ -153,13 +153,7 @@ async def refresh_token(body: RefreshRequest):
 
         new_tokens = await oidc_client.fetch_access_token(**kwargs)
         
-        return {
-            "message": "Authorization successful",
-            "token": {
-                "access_token": new_tokens.get("access_token"),
-                "refresh_token": new_tokens.get("refresh_token"),
-            }
-        }
+        return auth_adapter.token_response(token = new_tokens)
     except Exception as exc:
         logger.error("Unexpected Exception during refresh: %s", exc, exc_info=True)
         return auth_adapter.error_handler(exc)
