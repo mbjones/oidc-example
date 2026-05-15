@@ -9,4 +9,5 @@ source ${VIRTUAL_ENV}/bin/activate
 uv sync --active
 
 echo "Starting app..."
-python fastapi-authlib.py
+#python fastapi-authlib.py
+python flask-authlib.py

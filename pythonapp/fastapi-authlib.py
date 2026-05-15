@@ -57,11 +57,7 @@ app.add_middleware(
 )
 
 # --- Auth Setup ---
-try:
-    secrets = load_client_secrets()
-except (FileNotFoundError, json.JSONDecodeError) as exc:
-    logger.warning("Could not load client secrets (%s). Auth unavailable.", exc)
-    secrets = {}
+secrets = load_client_secrets()
 
 auth_adapter = AuthFactory.create_client("fastapi", secrets, scopes)
 oidc_client = auth_adapter.dataone_oidc
@@ -71,7 +67,6 @@ security = HTTPBearer()
 # --- Routes ---
 @app.get("/login")
 async def login(request: Request):
-    # One line: Redirect to Keycloak
     return await auth_adapter.login(
         request=request,
         redirect_uri=str(request.url_for("authorize"))
@@ -79,12 +74,10 @@ async def login(request: Request):
 
 @app.get("/authorize")
 async def authorize(request: Request):
-    # One line: Exchange code for token and return JSON
     return await auth_adapter.authorize(request=request)
 
 @app.post("/refresh")
 async def refresh(request: Request):
-    # One line: Extract body, refresh, and return JSON
     body = await request.json()
     return await auth_adapter.refresh(body)
 

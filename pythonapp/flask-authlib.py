@@ -30,10 +30,7 @@ if not isinstance(app.wsgi_app, ProxyFix):
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # --- Auth Setup ---
-try:
-    secrets = load_client_secrets()
-except (FileNotFoundError, json.JSONDecodeError) as exc:
-    logger.warning("Could not load client secrets (%s). Auth unavailable.", exc)
+secrets = load_client_secrets()
     
 auth_client = AuthFactory.create_client("flask", secrets, scopes)
 auth_client.init_app(app)
