@@ -5,13 +5,23 @@ description = "Keycloak Test Client"
 requires-python = ">=3.13"
 dependencies = [
     "authlib>=1.6.4",
+    "dataone-auth",
+    "fastapi>=0.136.1",
     "flask>=3.1.2",
     "flask-oidc>=2.4.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
     "pyjwt>=2.10.1",
     "requests>=2.32.5",
+    "starlette>=1.0.0",
+    "typing>=3.10.0.0",
+    "uvicorn>=0.46.0",
 ]
 
 [dependency-groups]
 dev = [
     "black>=26.1.0",
 ]
+
+[tool.uv.sources]
+dataone-auth = { git = "https://github.com/DataONEorg/dataone-auth.git", rev = "feature-generalize-api" }

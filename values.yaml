@@ -23,6 +23,10 @@ args:
 env:
   - name: FLASK_SECRET_KEY
     value: "66b33c640bcf6b1b7704d1192c67b182394cd64284d5f1673c50ce42e120ddf6"
+  - name: OIDC_CLIENT_SECRETS_FILE
+    value: "./client_secrets.json"
+  - name: ACCESS_MODE
+    value: "authenticated"
 
 # Additional volumeMounts on the output Deployment definition.
 volumeMounts:
