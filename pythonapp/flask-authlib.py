@@ -15,12 +15,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from dataone.auth import AuthFactory, load_client_secrets
 
-
 # --- Constants & Logging ---
 ACCESS_MODE_AUTHENTICATED = "authenticated"
 scopes = ["ogdc:admin"]
 logger = logging.getLogger(__name__)
-
 
 # --- App Initialization ---
 app = Flask(__name__)
@@ -54,7 +52,7 @@ def refresh_token():
     return auth_client.refresh(request_json=request.get_json(silent=True))
 
 @app.route("/profile", methods=["GET"])
-@auth_client.require_scope("ogdc:admin")
+@auth_client.require_token(methods=["GET"])
 def profile(claims):
     """Protected resource endpoint that requires 'profile' scope."""
     return (

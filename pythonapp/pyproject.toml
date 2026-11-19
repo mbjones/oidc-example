@@ -24,4 +24,4 @@ dev = [
 ]
 
 [tool.uv.sources]
-dataone-auth = { git = "https://github.com/DataONEorg/dataone-auth.git", rev = "feature-generalize-api" }
+dataone-auth = { git = "https://github.com/DataONEorg/dataone-auth.git", rev = "develop" }

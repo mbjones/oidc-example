@@ -60,7 +60,6 @@ app.add_middleware(
 secrets = load_client_secrets()
 
 auth_adapter = AuthFactory.create_client("fastapi", secrets, scopes)
-oidc_client = auth_adapter.dataone_oidc
 security = HTTPBearer()
 
 
@@ -82,7 +81,7 @@ async def refresh(request: Request):
     return await auth_adapter.refresh(body)
 
 @app.get("/profile")
-async def profile(claims: Optional[dict] = Depends(auth_adapter.require_scope("ogdc:admin"))):
+async def profile(claims: Optional[dict] = Depends(auth_adapter.require_token(methods = ["GET"]))):
     """
     Protected resource endpoint.
     """
